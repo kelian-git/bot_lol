@@ -57,7 +57,7 @@ def get_latest_version():
         r = requests.get("https://ddragon.leagueoflegends.com/api/versions.json")
         return r.json()[0]
     except:
-        return "15.6.1"
+        return "16.6.1"
 
 def get_champion_icon_url(champion_name, version=None):
     if not version:

@@ -5,8 +5,10 @@ import json
 import os
 import asyncio
 import requests as req
+from io import BytesIO
 from datetime import datetime
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont
 from riot_api import (
     get_summoner, get_summoner_by_puuid, get_spectator,
     get_last_match_id, get_match_details, get_elo,
@@ -23,7 +25,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-# Charger les joueurs
+# ── JOUEURS ──
 def load_joueurs():
     if not os.path.exists("joueurs.json"):
         with open("joueurs.json", "w") as f:
@@ -35,9 +37,9 @@ def save_joueurs(joueurs):
     with open("joueurs.json", "w") as f:
         json.dump({"joueurs": joueurs}, f, indent=2)
 
-# Dictionnaire des noms de champions (id -> nom)
+# ── CHAMPIONS ──
 champion_id_to_name = {}
-ddragon_version = "15.6.1"
+ddragon_version = "16.6.1"
 
 def load_champion_data():
     global champion_id_to_name, ddragon_version
@@ -55,7 +57,16 @@ def load_champion_data():
 def get_champion_name(champion_id):
     return champion_id_to_name.get(int(champion_id), str(champion_id))
 
-# Images de rang officielles Riot
+def get_champ_icon(champion_name):
+    try:
+        url = get_champion_icon_url(champion_name, ddragon_version)
+        r = req.get(url, timeout=5)
+        img = Image.open(BytesIO(r.content)).convert("RGBA").resize((80, 80))
+        return img
+    except:
+        return None
+
+# ── TIER IMAGES & ORDRE ──
 TIER_IMAGES = {
     "CHALLENGER":   "https://raw.communitydragon.org/latest/plugins/rcp-fe-lol-shared-components/global/default/images/ranked-emblem/emblem-challenger.png",
     "GRANDMASTER":  "https://raw.communitydragon.org/latest/plugins/rcp-fe-lol-shared-components/global/default/images/ranked-emblem/emblem-grandmaster.png",
@@ -72,22 +83,154 @@ TIER_IMAGES = {
 
 TIER_ORDER = ["CHALLENGER", "GRANDMASTER", "MASTER", "DIAMOND", "EMERALD", "PLATINUM", "GOLD", "SILVER", "BRONZE", "IRON", "ZZZ"]
 
+LANE_COLORS = {
+    "Top":     (200, 150, 50),
+    "Jungle":  (80, 180, 80),
+    "Mid":     (150, 100, 220),
+    "Bot":     (50, 150, 220),
+    "Support": (220, 100, 150),
+    "Inconnue":(150, 150, 150),
+}
+
+# ── GÉNÉRATION IMAGE FLEX ──
+def generate_flex_image(blue_team, red_team, win, mode, duration, lp_data):
+    """
+    blue_team / red_team : liste de (champion_name, kda, lane)
+    lp_data : liste de (pseudo, rank_str, lp_before, lp_after) pour les joueurs suivis
+    """
+    ICON_SIZE = 80
+    PADDING = 12
+    VS_WIDTH = 50
+    TEXT_HEIGHT = 18
+    BG_COLOR = (15, 15, 25)
+    WHITE = (255, 255, 255)
+    GRAY = (150, 150, 150)
+    YELLOW = (255, 200, 0)
+    GREEN = (80, 220, 80)
+    RED_C = (220, 80, 80)
+
+    n = 5
+    icon_block_w = (n * (ICON_SIZE + PADDING)) * 2 + VS_WIDTH + PADDING * 6
+    icon_block_h = ICON_SIZE + TEXT_HEIGHT * 3 + PADDING * 4
+    header_h = 90
+    footer_h = 30 * len(lp_data) + PADDING * 2 if lp_data else 0
+
+    total_width = icon_block_w
+    total_height = header_h + icon_block_h + footer_h
+
+    img = Image.new("RGB", (total_width, total_height), BG_COLOR)
+    draw = ImageDraw.Draw(img)
+
+    try:
+        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+        font_sub = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
+        font_vs = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+        font_role = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 11)
+    except:
+        font_bold = font = font_title = font_sub = font_vs = font_role = ImageFont.load_default()
+
+    result_color = GREEN if win else RED_C
+
+    # Ligne couleur résultat en haut
+    draw.rectangle([0, 0, total_width, 4], fill=result_color)
+
+    # Titre
+    title = "✅  VICTOIRE" if win else "❌  DÉFAITE"
+    bbox = draw.textbbox((0,0), title, font=font_title)
+    tw = bbox[2]-bbox[0]
+    draw.text(((total_width-tw)//2, 14), title, font=font_title, fill=result_color)
+
+    # Sous-titre
+    tracked_count = len(lp_data)
+    sub = f"{mode}  •  {duration}  •  {tracked_count} joueur(s) suivi(s)"
+    bbox = draw.textbbox((0,0), sub, font=font_sub)
+    tw = bbox[2]-bbox[0]
+    draw.text(((total_width-tw)//2, 48), sub, font=font_sub, fill=GRAY)
+
+    # Séparateur
+    draw.rectangle([PADDING*2, 78, total_width-PADDING*2, 80], fill=(40, 40, 60))
+
+    def draw_team(team_data, start_x, border_color, icon_color, offset_y):
+        for i, (champ, kda, role) in enumerate(team_data):
+            x = start_x + i * (ICON_SIZE + PADDING)
+            y = offset_y + PADDING
+
+            # Essayer de charger l'icône du champion
+            champ_icon = get_champ_icon(champ)
+            if champ_icon:
+                draw.rectangle([x-2, y-2, x+ICON_SIZE+2, y+ICON_SIZE+2], fill=border_color)
+                img.paste(champ_icon, (x, y), champ_icon)
+            else:
+                draw.rectangle([x-2, y-2, x+ICON_SIZE+2, y+ICON_SIZE+2], fill=border_color)
+                draw.rectangle([x, y, x+ICON_SIZE, y+ICON_SIZE], fill=icon_color)
+                initials = champ[:2].upper()
+                bbox = draw.textbbox((0,0), initials, font=font_bold)
+                tw2, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
+                draw.text((x + (ICON_SIZE-tw2)//2, y + (ICON_SIZE-th)//2), initials, font=font_bold, fill=WHITE)
+
+            # Nom
+            name = champ[:8]
+            bbox = draw.textbbox((0,0), name, font=font)
+            tw2 = bbox[2]-bbox[0]
+            draw.text((x + (ICON_SIZE-tw2)//2, y + ICON_SIZE + 4), name, font=font, fill=GRAY)
+
+            # KDA
+            bbox2 = draw.textbbox((0,0), kda, font=font_bold)
+            tw2 = bbox2[2]-bbox2[0]
+            draw.text((x + (ICON_SIZE-tw2)//2, y + ICON_SIZE + TEXT_HEIGHT + 5), kda, font=font_bold, fill=WHITE)
+
+            # Rôle coloré
+            role_color = LANE_COLORS.get(role, (150,150,150))
+            bbox3 = draw.textbbox((0,0), role, font=font_role)
+            tw2 = bbox3[2]-bbox3[0]
+            draw.text((x + (ICON_SIZE-tw2)//2, y + ICON_SIZE + TEXT_HEIGHT*2 + 6), role, font=font_role, fill=role_color)
+
+    offset_y = header_h
+    draw_team(blue_team, PADDING, (40, 80, 160), (50, 100, 200), offset_y)
+
+    # VS
+    vs_x = PADDING + n * (ICON_SIZE + PADDING) + PADDING
+    draw.text((vs_x + 4, offset_y + ICON_SIZE//2), "VS", font=font_vs, fill=YELLOW)
+
+    # Équipe rouge
+    red_start = vs_x + VS_WIDTH + PADDING
+    draw_team(red_team, red_start, (160, 40, 40), (200, 50, 50), offset_y)
+
+    # Footer LP
+    if lp_data:
+        footer_y = header_h + icon_block_h
+        draw.rectangle([PADDING*2, footer_y, total_width-PADDING*2, footer_y+2], fill=(40, 40, 60))
+        for i, (pseudo, rank_str, lp_before, lp_after) in enumerate(lp_data):
+            y = footer_y + PADDING + i * 30
+            diff = lp_after - lp_before
+            diff_color = GREEN if diff >= 0 else RED_C
+            diff_str = f"+{diff}" if diff >= 0 else str(diff)
+            line = f"{pseudo}  —  {rank_str}  •  {lp_before} → {lp_after} LP  ({diff_str})"
+            draw.text((PADDING * 3, y + 6), line, font=font_sub, fill=WHITE)
+
+    # Ligne couleur résultat en bas
+    draw.rectangle([0, total_height-4, total_width, total_height], fill=result_color)
+
+    # Sauvegarder en bytes
+    output = BytesIO()
+    img.convert("RGB").save(output, format="PNG")
+    output.seek(0)
+    return output
+
+
+# ── ELO EMBED ──
 def build_elo_embed(lines, page, total_pages, file_name, total_joueurs):
     chunk = lines[page * 10:(page + 1) * 10]
     top_tier = chunk[0][0] if chunk else "ZZZ"
     tier_image = TIER_IMAGES.get(top_tier, TIER_IMAGES["ZZZ"])
-
-    embed = discord.Embed(
-        title=f"📊 Classement — {file_name}",
-        color=0x2ecc71
-    )
+    embed = discord.Embed(title=f"📊 Classement — {file_name}", color=0x2ecc71)
     embed.set_thumbnail(url=tier_image)
-
     description = ""
     for i, (tier, rank, lp, text) in enumerate(chunk):
         position = page * 10 + i + 1
         description += f"`#{position:02}` {text}\n\n"
-
     embed.description = description
     embed.set_footer(text=f"Page {page + 1}/{total_pages} • {total_joueurs} joueurs suivis")
     return embed
@@ -129,12 +272,16 @@ class EloView(discord.ui.View):
         await interaction.edit_original_response(embed=embed, view=self)
 
 
-# Etat des joueurs en game
+# ── ÉTAT DES GAMES ──
 en_game = {}
+# Sauvegarde les LP avant la game : {puuid: {queue_type: lp}}
+lp_snapshot = {}
+
 
 @bot.event
 async def setup_hook():
     load_champion_data()
+
 
 @bot.event
 async def on_ready():
@@ -142,7 +289,8 @@ async def on_ready():
     print(f"✅ Bot connecté : {bot.user}")
     check_games.start()
 
-# Commande /ajouter
+
+# ── COMMANDES ──
 @tree.command(name="ajouter", description="Ajouter un joueur à surveiller")
 @app_commands.describe(pseudo="Pseudo du joueur", tag="Tag (ex: EUW)")
 async def ajouter(interaction: discord.Interaction, pseudo: str, tag: str):
@@ -162,7 +310,7 @@ async def ajouter(interaction: discord.Interaction, pseudo: str, tag: str):
     save_joueurs(joueurs)
     await interaction.followup.send(f"✅ `{pseudo}#{tag}` ajouté à la liste de surveillance !")
 
-# Commande /supprimer
+
 @tree.command(name="supprimer", description="Supprimer un joueur de la surveillance")
 @app_commands.describe(pseudo="Pseudo du joueur")
 async def supprimer(interaction: discord.Interaction, pseudo: str):
@@ -174,7 +322,7 @@ async def supprimer(interaction: discord.Interaction, pseudo: str):
     save_joueurs(new_list)
     await interaction.response.send_message(f"✅ `{pseudo}` supprimé de la liste !")
 
-# Commande /elo
+
 @tree.command(name="elo", description="Afficher l'elo de tous les joueurs suivis")
 @app_commands.describe(file="La file : solo ou flex")
 async def elo(interaction: discord.Interaction, file: str = "solo"):
@@ -199,8 +347,7 @@ async def elo(interaction: discord.Interaction, file: str = "solo"):
             losses = entry["losses"]
             total = wins + losses
             winrate = round((wins / total) * 100) if total > 0 else 0
-            lines.append((
-                tier, rank, lp,
+            lines.append((tier, rank, lp,
                 f"**{j['pseudo']}**\n"
                 f"┣ {tier.capitalize()} {rank} — {lp} LP\n"
                 f"┗ {wins}W / {losses}L — {winrate}% WR"
@@ -226,7 +373,8 @@ async def elo(interaction: discord.Interaction, file: str = "solo"):
     else:
         await interaction.followup.send(embed=embed)
 
-# Boucle de vérification toutes les 60 secondes
+
+# ── BOUCLE PRINCIPALE ──
 @tasks.loop(seconds=60)
 async def check_games():
     print("🔄 Vérification des games...")
@@ -237,15 +385,25 @@ async def check_games():
     joueurs = load_joueurs()
     print(f"👥 {len(joueurs)} joueur(s) surveillé(s)")
 
+    # Détecter les games en cours et regrouper par gameId
+    active_games = {}  # gameId -> list of joueur
     for j in joueurs:
         puuid = j["puuid"]
-        pseudo = j["pseudo"]
-        print(f"🔍 Vérification de {pseudo}...")
         game_data = get_spectator(puuid)
-
         if game_data:
-            print(f"🎮 {pseudo} est en game !")
+            game_id = game_data.get("gameId")
+            if game_id not in active_games:
+                active_games[game_id] = []
+            active_games[game_id].append((j, game_data))
+
+    # Traiter chaque game active
+    for game_id, players in active_games.items():
+        for j, game_data in players:
+            puuid = j["puuid"]
+            pseudo = j["pseudo"]
+
             if puuid not in en_game:
+                print(f"🎮 {pseudo} est en game !")
                 queue_id = game_data.get("gameQueueConfigId", 0)
                 mode = QUEUE_NAMES.get(queue_id, "Autre mode")
                 last_match = get_last_match_id(puuid)
@@ -256,73 +414,190 @@ async def check_games():
 
                 champion = get_champion_name(player_data["championId"])
 
+                # Sauvegarder LP avant la game
+                queue_type = "RANKED_FLEX_SR" if queue_id == 440 else "RANKED_SOLO_5x5"
+                elo_data = get_elo(puuid)
+                entry = next((e for e in elo_data if e["queueType"] == queue_type), None)
+                lp_before = entry["leaguePoints"] if entry else None
+                rank_str = f"{entry['tier'].capitalize()} {entry['rank']}" if entry else "Non classé"
+
+                lp_snapshot[puuid] = {
+                    "lp": lp_before,
+                    "rank": rank_str,
+                    "queue_type": queue_type
+                }
+
                 en_game[puuid] = {
                     "champion": champion,
                     "mode": mode,
+                    "queue_id": queue_id,
+                    "game_id": game_id,
                     "last_match_before": last_match
                 }
 
+                # Message début de game
                 embed = discord.Embed(title="🎮 En Game !", color=0x2ecc71)
                 embed.add_field(name="👤 Joueur", value=pseudo, inline=True)
                 embed.add_field(name="🎯 Mode", value=mode, inline=True)
                 embed.add_field(name="🏆 Champion", value=champion, inline=True)
+                if lp_before is not None:
+                    embed.add_field(name="📊 Rang actuel", value=f"{rank_str} — {lp_before} LP", inline=False)
                 embed.set_thumbnail(url=get_champion_icon_url(champion, ddragon_version))
                 await channel.send(embed=embed)
 
-        else:
-            print(f"💤 {pseudo} n'est pas en game")
-            if puuid in en_game:
-                game_info = en_game.pop(puuid)
-                print(f"🏁 Fin de game détectée pour {pseudo}, attente 30s...")
-                await asyncio.sleep(30)
+    # Détecter les fins de game
+    for j in joueurs:
+        puuid = j["puuid"]
+        pseudo = j["pseudo"]
 
-                new_match_id = get_last_match_id(puuid)
-                if not new_match_id or new_match_id == game_info["last_match_before"]:
-                    print(f"⚠️ Pas de nouveau match trouvé pour {pseudo}")
+        if puuid in en_game and not any(puuid in [p["puuid"] for p, _ in players] for players in active_games.values() if any(p["puuid"] == puuid for p, _ in players)):
+            game_info = en_game.pop(puuid)
+            print(f"🏁 Fin de game détectée pour {pseudo}, attente 30s...")
+            await asyncio.sleep(30)
+
+            new_match_id = get_last_match_id(puuid)
+            if not new_match_id or new_match_id == game_info["last_match_before"]:
+                print(f"⚠️ Pas de nouveau match trouvé pour {pseudo}")
+                lp_snapshot.pop(puuid, None)
+                continue
+
+            match = get_match_details(new_match_id)
+            if not match:
+                lp_snapshot.pop(puuid, None)
+                continue
+
+            info = match["info"]
+            duration_sec = info["gameDuration"]
+            duration = f"{duration_sec // 60} min {duration_sec % 60} sec"
+            queue_id = info.get("queueId", 0)
+            mode = QUEUE_NAMES.get(queue_id, game_info["mode"])
+            is_flex = queue_id == 440
+
+            player_stats = next((p for p in info["participants"] if p["puuid"] == puuid), None)
+            if not player_stats:
+                lp_snapshot.pop(puuid, None)
+                continue
+
+            win = player_stats["win"]
+
+            # Récupérer LP après la game
+            lp_after = None
+            rank_str_after = None
+            snap = lp_snapshot.pop(puuid, None)
+            if snap:
+                elo_after = get_elo(puuid)
+                entry_after = next((e for e in elo_after if e["queueType"] == snap["queue_type"]), None)
+                if entry_after:
+                    lp_after = entry_after["leaguePoints"]
+                    rank_str_after = f"{entry_after['tier'].capitalize()} {entry_after['rank']}"
+
+            # Vérifier si c'est un recap groupé en Flex
+            if is_flex:
+                # Chercher d'autres joueurs suivis dans la même game
+                group_puuids = [
+                    j2["puuid"] for j2 in joueurs
+                    if j2["puuid"] != puuid
+                    and j2["puuid"] in en_game
+                    and en_game[j2["puuid"]].get("game_id") == game_info.get("game_id")
+                ]
+
+                if group_puuids:
+                    # On laisse le premier joueur traiter le recap groupé
+                    # Les autres on les retire de en_game sans envoyer de message
+                    already_processed = game_info.get("group_processed", False)
+                    if already_processed:
+                        continue
+
+                    # Marquer comme traité
+                    game_info["group_processed"] = True
+
+                    # Récupérer tous les participants du match
+                    all_participants = info["participants"]
+                    blue = [p for p in all_participants if p["teamId"] == 100]
+                    red = [p for p in all_participants if p["teamId"] == 200]
+
+                    def build_team(team):
+                        result = []
+                        for p in team:
+                            kda = f"{p['kills']}/{p['deaths']}/{p['assists']}"
+                            lane = LANE_NAMES.get(p.get("teamPosition", ""), "Inconnue")
+                            result.append((p["championName"], kda, lane))
+                        return result
+
+                    blue_team = build_team(blue)
+                    red_team = build_team(red)
+
+                    # LP data pour les joueurs suivis dans cette game
+                    lp_data = []
+                    all_tracked_puuids = [puuid] + group_puuids
+                    for tracked_puuid in all_tracked_puuids:
+                        tracked_j = next((j2 for j2 in joueurs if j2["puuid"] == tracked_puuid), None)
+                        if not tracked_j:
+                            continue
+                        snap2 = lp_snapshot.pop(tracked_puuid, None)
+                        if snap2 and snap2["lp"] is not None:
+                            elo2 = get_elo(tracked_puuid)
+                            entry2 = next((e for e in elo2 if e["queueType"] == "RANKED_FLEX_SR"), None)
+                            if entry2:
+                                lp_data.append((
+                                    tracked_j["pseudo"],
+                                    f"{entry2['tier'].capitalize()} {entry2['rank']}",
+                                    snap2["lp"],
+                                    entry2["leaguePoints"]
+                                ))
+                        # Retirer de en_game
+                        en_game.pop(tracked_puuid, None)
+
+                    # Générer l'image
+                    img_bytes = generate_flex_image(blue_team, red_team, win, mode, duration, lp_data)
+                    file = discord.File(img_bytes, filename="recap_flex.png")
+                    embed = discord.Embed(
+                        title="✅ Game Flex terminée !" if win else "❌ Game Flex terminée !",
+                        color=0x2ecc71 if win else 0xe74c3c
+                    )
+                    embed.set_image(url="attachment://recap_flex.png")
+                    await channel.send(embed=embed, file=file)
                     continue
 
-                match = get_match_details(new_match_id)
-                if not match:
-                    continue
+            # ── RECAP SOLO ──
+            champ_player = player_stats["championName"]
+            kda_player = f"{player_stats['kills']} / {player_stats['deaths']} / {player_stats['assists']}"
+            lane = LANE_NAMES.get(player_stats.get("teamPosition", ""), "Inconnue")
 
-                info = match["info"]
-                duration_sec = info["gameDuration"]
-                duration = f"{duration_sec // 60} min {duration_sec % 60} sec"
+            opponent_stats = next((
+                p for p in info["participants"]
+                if p.get("teamPosition") == player_stats.get("teamPosition")
+                and p["teamId"] != player_stats["teamId"]
+            ), None)
 
-                player_stats = next((p for p in info["participants"] if p["puuid"] == puuid), None)
-                if not player_stats:
-                    continue
+            champ_opp = opponent_stats["championName"] if opponent_stats else "Inconnu"
+            kda_opp = f"{opponent_stats['kills']} / {opponent_stats['deaths']} / {opponent_stats['assists']}" if opponent_stats else "N/A"
 
-                win = player_stats["win"]
-                kda_player = f"{player_stats['kills']} / {player_stats['deaths']} / {player_stats['assists']}"
-                champ_player = player_stats["championName"]
-                lane = LANE_NAMES.get(player_stats.get("teamPosition", ""), "Inconnue")
+            embed = discord.Embed(
+                title="✅ Game terminée !",
+                color=0x2ecc71 if win else 0xe74c3c
+            )
+            embed.add_field(name="👤 Joueur", value=pseudo, inline=True)
+            embed.add_field(name="🎯 Mode", value=mode, inline=True)
+            embed.add_field(name="⏱️ Durée", value=duration, inline=True)
+            embed.add_field(name="⚔️ Matchup", value=f"{pseudo} ({champ_player}) vs {champ_opp} — {lane}", inline=False)
+            embed.add_field(name=f"📊 KDA {pseudo}", value=kda_player, inline=True)
+            embed.add_field(name=f"📊 KDA {champ_opp}", value=kda_opp, inline=True)
 
-                opponent_stats = next((
-                    p for p in info["participants"]
-                    if p.get("teamPosition") == player_stats.get("teamPosition")
-                    and p["teamId"] != player_stats["teamId"]
-                ), None)
-
-                champ_opp = opponent_stats["championName"] if opponent_stats else "Inconnu"
-                kda_opp = f"{opponent_stats['kills']} / {opponent_stats['deaths']} / {opponent_stats['assists']}" if opponent_stats else "N/A"
-
-                queue_id = info.get("queueId", 0)
-                mode = QUEUE_NAMES.get(queue_id, game_info["mode"])
-
-                embed = discord.Embed(
-                    title="✅ Game terminée !",
-                    color=0x2ecc71 if win else 0xe74c3c
+            # LP avant/après
+            if snap and snap["lp"] is not None and lp_after is not None:
+                diff = lp_after - snap["lp"]
+                diff_str = f"+{diff}" if diff >= 0 else str(diff)
+                embed.add_field(
+                    name="📈 LP",
+                    value=f"{snap['lp']} → {lp_after} LP ({diff_str})",
+                    inline=False
                 )
-                embed.add_field(name="👤 Joueur", value=pseudo, inline=True)
-                embed.add_field(name="🎯 Mode", value=mode, inline=True)
-                embed.add_field(name="⏱️ Durée", value=duration, inline=True)
-                embed.add_field(name="⚔️ Matchup", value=f"{pseudo} ({champ_player}) vs {champ_opp} — {lane}", inline=False)
-                embed.add_field(name=f"📊 KDA {pseudo}", value=kda_player, inline=True)
-                embed.add_field(name=f"📊 KDA {champ_opp}", value=kda_opp, inline=True)
-                embed.add_field(name="🏆 Résultat", value="VICTOIRE 🏆" if win else "DÉFAITE 💀", inline=False)
-                embed.set_thumbnail(url=get_champion_icon_url(champ_player, ddragon_version))
-                embed.set_image(url=get_champion_icon_url(champ_opp, ddragon_version))
-                await channel.send(embed=embed)
+
+            embed.add_field(name="🏆 Résultat", value="VICTOIRE 🏆" if win else "DÉFAITE 💀", inline=False)
+            embed.set_thumbnail(url=get_champion_icon_url(champ_player, ddragon_version))
+            embed.set_image(url=get_champion_icon_url(champ_opp, ddragon_version))
+            await channel.send(embed=embed)
+
 
 bot.run(DISCORD_TOKEN)
