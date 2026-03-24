@@ -221,7 +221,10 @@ async def elo(interaction: discord.Interaction, file: str = "solo"):
     total_pages = (len(lines) + 9) // 10
     view = EloView(lines, file_name, len(joueurs)) if total_pages > 1 else None
     embed = build_elo_embed(lines, 0, total_pages, file_name, len(joueurs))
-    await interaction.followup.send(embed=embed, view=view)
+    if view:
+        await interaction.followup.send(embed=embed, view=view)
+    else:
+        await interaction.followup.send(embed=embed)
 
 # Boucle de vérification toutes les 60 secondes
 @tasks.loop(seconds=60)
