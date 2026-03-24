@@ -92,6 +92,35 @@ LANE_COLORS = {
     "Inconnue":(150, 150, 150),
 }
 
+# ── CALCUL LP ──
+TIER_VALUES = {
+    "IRON": 0, "BRONZE": 400, "SILVER": 800, "GOLD": 1200,
+    "PLATINUM": 1600, "EMERALD": 2000, "DIAMOND": 2400,
+    "MASTER": 2800, "GRANDMASTER": 2800, "CHALLENGER": 2800
+}
+RANK_VALUES = {"I": 300, "II": 200, "III": 100, "IV": 0}
+
+def lp_to_total(tier, rank, lp):
+    return TIER_VALUES.get(tier, 0) + RANK_VALUES.get(rank, 0) + lp
+
+def format_lp_diff(snap, lp_after, rank_after_str, tier_after, rank_after):
+    if not snap or snap["lp"] is None or lp_after is None:
+        return None
+    rank_before_str = snap["rank"]
+    lp_before = snap["lp"]
+    tier_before, rank_before = snap["rank"].split(" ") if " " in snap["rank"] else (snap["rank"], "I")
+    tier_before = tier_before.upper()
+
+    total_before = lp_to_total(tier_before, rank_before, lp_before)
+    total_after = lp_to_total(tier_after.upper(), rank_after, lp_after)
+    diff = total_after - total_before
+    diff_str = f"+{diff}" if diff >= 0 else str(diff)
+
+    if rank_before_str != rank_after_str:
+        return f"{rank_before_str} {lp_before} LP  ->  {rank_after_str} {lp_after} LP  ({diff_str})"
+    else:
+        return f"{lp_before} -> {lp_after} LP  ({diff_str})"
+
 # ── GENERATION IMAGE FLEX ──
 def generate_flex_image(blue_team, red_team, win, mode, duration, lp_data):
     ICON_SIZE = 80
@@ -129,23 +158,19 @@ def generate_flex_image(blue_team, red_team, win, mode, duration, lp_data):
 
     result_color = GREEN if win else RED_C
 
-    # Ligne couleur résultat en haut
     draw.rectangle([0, 0, total_width, 4], fill=result_color)
 
-    # Titre sans emojis
     title = "VICTOIRE" if win else "DEFAITE"
     bbox = draw.textbbox((0, 0), title, font=font_title)
     tw = bbox[2] - bbox[0]
     draw.text(((total_width - tw) // 2, 14), title, font=font_title, fill=result_color)
 
-    # Sous-titre sans emojis
     tracked_count = len(lp_data)
     sub = f"{mode}  |  {duration}  |  {tracked_count} joueur(s) suivi(s)"
     bbox = draw.textbbox((0, 0), sub, font=font_sub)
     tw = bbox[2] - bbox[0]
     draw.text(((total_width - tw) // 2, 48), sub, font=font_sub, fill=GRAY)
 
-    # Séparateur
     draw.rectangle([PADDING * 2, 78, total_width - PADDING * 2, 80], fill=(40, 40, 60))
 
     def draw_team(team_data, start_x, border_color, icon_color, offset_y):
@@ -188,17 +213,32 @@ def generate_flex_image(blue_team, red_team, win, mode, duration, lp_data):
     red_start = vs_x + VS_WIDTH + PADDING
     draw_team(red_team, red_start, (160, 40, 40), (200, 50, 50), offset_y)
 
-    # Footer LP sans emojis
     if lp_data:
         footer_y = header_h + icon_block_h
         draw.rectangle([PADDING * 2, footer_y, total_width - PADDING * 2, footer_y + 2], fill=(40, 40, 60))
-        for i, (pseudo, rank_str, lp_before, lp_after) in enumerate(lp_data):
+        for i, (pseudo, rank_before_str, rank_after_str, lp_before, lp_after, tier_after, rank_after) in enumerate(lp_data):
             y = footer_y + PADDING + i * 30
-            diff = lp_after - lp_before
-            diff_color = GREEN if diff >= 0 else RED_C
-            diff_str = f"+{diff}" if diff >= 0 else str(diff)
-            line = f"{pseudo}  -  {rank_str}  |  {lp_before} -> {lp_after} LP  ({diff_str})"
-            draw.text((PADDING * 3, y + 6), line, font=font_sub, fill=WHITE)
+            lp_text = format_lp_diff(
+                {"rank": rank_before_str, "lp": lp_before},
+                lp_after, rank_after_str, tier_after, rank_after
+            )
+            if rank_before_str != rank_after_str:
+                line = f"{pseudo}  -  {rank_before_str} -> {rank_after_str}  |  {lp_before} -> {lp_after} LP"
+                diff_total = lp_to_total(tier_after.upper(), rank_after, lp_after) - lp_to_total(rank_before_str.split()[0].upper(), rank_before_str.split()[1] if len(rank_before_str.split()) > 1 else "I", lp_before)
+                diff_str = f"+{diff_total}" if diff_total >= 0 else str(diff_total)
+                line += f"  ({diff_str})"
+            else:
+                diff = lp_after - lp_before
+                diff_str = f"+{diff}" if diff >= 0 else str(diff)
+                line = f"{pseudo}  -  {rank_before_str}  |  {lp_before} -> {lp_after} LP  ({diff_str})"
+
+            diff_val = lp_to_total(tier_after.upper(), rank_after, lp_after) - lp_to_total(
+                rank_before_str.split()[0].upper(),
+                rank_before_str.split()[1] if len(rank_before_str.split()) > 1 else "I",
+                lp_before
+            )
+            line_color = GREEN if diff_val >= 0 else RED_C
+            draw.text((PADDING * 3, y + 6), line, font=font_sub, fill=line_color)
 
     draw.rectangle([0, total_height - 4, total_width, total_height], fill=result_color)
 
@@ -263,7 +303,6 @@ class EloView(discord.ui.View):
 # ── ETAT DES GAMES ──
 en_game = {}
 lp_snapshot = {}
-# Suivi des recaps groupés déjà envoyés : match_id -> True
 group_recap_sent = {}
 
 
@@ -403,16 +442,19 @@ async def check_games():
 
                 champion = get_champion_name(player_data["championId"])
 
-                # Sauvegarder LP avant la game
                 queue_type = "RANKED_FLEX_SR" if queue_id == 440 else "RANKED_SOLO_5x5"
                 elo_data = get_elo(puuid)
                 entry = next((e for e in elo_data if e["queueType"] == queue_type), None)
                 lp_before = entry["leaguePoints"] if entry else None
+                tier_before = entry["tier"] if entry else None
+                rank_before = entry["rank"] if entry else None
                 rank_str = f"{entry['tier'].capitalize()} {entry['rank']}" if entry else "Non classe"
 
                 lp_snapshot[puuid] = {
                     "lp": lp_before,
                     "rank": rank_str,
+                    "tier": tier_before,
+                    "division": rank_before,
                     "queue_type": queue_type
                 }
 
@@ -475,35 +517,33 @@ async def check_games():
             continue
 
         win = player_stats["win"]
+        snap = lp_snapshot.pop(puuid, None)
 
         # LP après la game
-        snap = lp_snapshot.pop(puuid, None)
         lp_after = None
+        tier_after = None
+        rank_after = None
+        rank_after_str = None
         if snap:
             elo_after = get_elo(puuid)
             entry_after = next((e for e in elo_after if e["queueType"] == snap["queue_type"]), None)
             if entry_after:
                 lp_after = entry_after["leaguePoints"]
+                tier_after = entry_after["tier"]
+                rank_after = entry_after["rank"]
+                rank_after_str = f"{tier_after.capitalize()} {rank_after}"
 
         # ── RECAP GROUPE FLEX ──
         if is_flex:
-            # Vérifier si ce match_id a déjà eu un recap groupé
             if new_match_id in group_recap_sent:
-                # Ajouter juste les LP de ce joueur si pas déjà dedans
                 continue
 
-            # Chercher tous les joueurs suivis dans ce match
             all_participants_puuids = {p["puuid"] for p in info["participants"]}
-            tracked_in_game = [
-                j2 for j2 in joueurs
-                if j2["puuid"] in all_participants_puuids
-            ]
+            tracked_in_game = [j2 for j2 in joueurs if j2["puuid"] in all_participants_puuids]
 
             if len(tracked_in_game) > 1:
-                # Recap groupé
                 group_recap_sent[new_match_id] = True
 
-                # Retirer les autres joueurs de en_game pour éviter des recaps solo
                 for j2 in tracked_in_game:
                     if j2["puuid"] != puuid:
                         en_game.pop(j2["puuid"], None)
@@ -523,26 +563,34 @@ async def check_games():
                 blue_team = build_team(blue)
                 red_team = build_team(red)
 
-                # LP data pour tous les joueurs suivis dans la game
                 lp_data = []
                 for j2 in tracked_in_game:
                     p2_puuid = j2["puuid"]
-                    snap2 = lp_snapshot.pop(p2_puuid, None)
                     if p2_puuid == puuid:
                         snap2 = snap
                         lp_after2 = lp_after
+                        tier_after2 = tier_after
+                        rank_after2 = rank_after
+                        rank_after_str2 = rank_after_str
                     else:
+                        snap2 = lp_snapshot.pop(p2_puuid, None)
                         elo2 = get_elo(p2_puuid)
                         queue_type2 = snap2["queue_type"] if snap2 else "RANKED_FLEX_SR"
                         entry2 = next((e for e in elo2 if e["queueType"] == queue_type2), None)
                         lp_after2 = entry2["leaguePoints"] if entry2 else None
+                        tier_after2 = entry2["tier"] if entry2 else None
+                        rank_after2 = entry2["rank"] if entry2 else None
+                        rank_after_str2 = f"{tier_after2.capitalize()} {rank_after2}" if entry2 else None
 
                     if snap2 and snap2["lp"] is not None and lp_after2 is not None:
                         lp_data.append((
                             j2["pseudo"],
                             snap2["rank"],
+                            rank_after_str2 or snap2["rank"],
                             snap2["lp"],
-                            lp_after2
+                            lp_after2,
+                            tier_after2 or snap2.get("tier", "GOLD"),
+                            rank_after2 or snap2.get("division", "IV")
                         ))
 
                 img_bytes = generate_flex_image(blue_team, red_team, win, mode, duration, lp_data)
@@ -580,14 +628,26 @@ async def check_games():
         embed.add_field(name=f"📊 KDA {pseudo}", value=kda_player, inline=True)
         embed.add_field(name=f"📊 KDA {champ_opp}", value=kda_opp, inline=True)
 
-        if snap and snap["lp"] is not None and lp_after is not None:
-            diff = lp_after - snap["lp"]
-            diff_str = f"+{diff}" if diff >= 0 else str(diff)
-            embed.add_field(
-                name="📈 LP",
-                value=f"{snap['lp']} -> {lp_after} LP ({diff_str})",
-                inline=False
-            )
+        if snap and snap["lp"] is not None and lp_after is not None and tier_after and rank_after:
+            rank_before_str = snap["rank"]
+            if rank_before_str != rank_after_str:
+                diff_total = lp_to_total(tier_after.upper(), rank_after, lp_after) - lp_to_total(
+                    snap.get("tier", "GOLD").upper(),
+                    snap.get("division", "IV"),
+                    snap["lp"]
+                )
+                diff_str = f"+{diff_total}" if diff_total >= 0 else str(diff_total)
+                lp_text = f"{rank_before_str} {snap['lp']} LP  ->  {rank_after_str} {lp_after} LP  ({diff_str})"
+            else:
+                diff = lp_to_total(tier_after.upper(), rank_after, lp_after) - lp_to_total(
+                    snap.get("tier", "GOLD").upper(),
+                    snap.get("division", "IV"),
+                    snap["lp"]
+                )
+                diff_str = f"+{diff}" if diff >= 0 else str(diff)
+                lp_text = f"{snap['lp']} -> {lp_after} LP  ({diff_str})"
+
+            embed.add_field(name="📈 LP", value=lp_text, inline=False)
 
         embed.add_field(name="🏆 Résultat", value="VICTOIRE 🏆" if win else "DÉFAITE 💀", inline=False)
         embed.set_thumbnail(url=get_champion_icon_url(champ_player, ddragon_version))
