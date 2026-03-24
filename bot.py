@@ -26,15 +26,19 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 # ── JOUEURS ──
+JOUEURS_PATH = "/app/data/joueurs.json"
+
 def load_joueurs():
-    if not os.path.exists("joueurs.json"):
-        with open("joueurs.json", "w") as f:
+    if not os.path.exists(JOUEURS_PATH):
+        os.makedirs(os.path.dirname(JOUEURS_PATH), exist_ok=True)
+        with open(JOUEURS_PATH, "w") as f:
             json.dump({"joueurs": []}, f)
-    with open("joueurs.json", "r") as f:
+    with open(JOUEURS_PATH, "r") as f:
         return json.load(f)["joueurs"]
 
 def save_joueurs(joueurs):
-    with open("joueurs.json", "w") as f:
+    os.makedirs(os.path.dirname(JOUEURS_PATH), exist_ok=True)
+    with open(JOUEURS_PATH, "w") as f:
         json.dump({"joueurs": joueurs}, f, indent=2)
 
 # ── CHAMPIONS ──
@@ -101,25 +105,7 @@ TIER_VALUES = {
 RANK_VALUES = {"I": 300, "II": 200, "III": 100, "IV": 0}
 
 def lp_to_total(tier, rank, lp):
-    return TIER_VALUES.get(tier, 0) + RANK_VALUES.get(rank, 0) + lp
-
-def format_lp_diff(snap, lp_after, rank_after_str, tier_after, rank_after):
-    if not snap or snap["lp"] is None or lp_after is None:
-        return None
-    rank_before_str = snap["rank"]
-    lp_before = snap["lp"]
-    tier_before, rank_before = snap["rank"].split(" ") if " " in snap["rank"] else (snap["rank"], "I")
-    tier_before = tier_before.upper()
-
-    total_before = lp_to_total(tier_before, rank_before, lp_before)
-    total_after = lp_to_total(tier_after.upper(), rank_after, lp_after)
-    diff = total_after - total_before
-    diff_str = f"+{diff}" if diff >= 0 else str(diff)
-
-    if rank_before_str != rank_after_str:
-        return f"{rank_before_str} {lp_before} LP  ->  {rank_after_str} {lp_after} LP  ({diff_str})"
-    else:
-        return f"{lp_before} -> {lp_after} LP  ({diff_str})"
+    return TIER_VALUES.get(tier.upper(), 0) + RANK_VALUES.get(rank, 0) + lp
 
 # ── GENERATION IMAGE FLEX ──
 def generate_flex_image(blue_team, red_team, win, mode, duration, lp_data):
@@ -218,27 +204,20 @@ def generate_flex_image(blue_team, red_team, win, mode, duration, lp_data):
         draw.rectangle([PADDING * 2, footer_y, total_width - PADDING * 2, footer_y + 2], fill=(40, 40, 60))
         for i, (pseudo, rank_before_str, rank_after_str, lp_before, lp_after, tier_after, rank_after) in enumerate(lp_data):
             y = footer_y + PADDING + i * 30
-            lp_text = format_lp_diff(
-                {"rank": rank_before_str, "lp": lp_before},
-                lp_after, rank_after_str, tier_after, rank_after
-            )
-            if rank_before_str != rank_after_str:
-                line = f"{pseudo}  -  {rank_before_str} -> {rank_after_str}  |  {lp_before} -> {lp_after} LP"
-                diff_total = lp_to_total(tier_after.upper(), rank_after, lp_after) - lp_to_total(rank_before_str.split()[0].upper(), rank_before_str.split()[1] if len(rank_before_str.split()) > 1 else "I", lp_before)
-                diff_str = f"+{diff_total}" if diff_total >= 0 else str(diff_total)
-                line += f"  ({diff_str})"
-            else:
-                diff = lp_after - lp_before
-                diff_str = f"+{diff}" if diff >= 0 else str(diff)
-                line = f"{pseudo}  -  {rank_before_str}  |  {lp_before} -> {lp_after} LP  ({diff_str})"
-
-            diff_val = lp_to_total(tier_after.upper(), rank_after, lp_after) - lp_to_total(
-                rank_before_str.split()[0].upper(),
-                rank_before_str.split()[1] if len(rank_before_str.split()) > 1 else "I",
+            diff_total = lp_to_total(tier_after, rank_after, lp_after) - lp_to_total(
+                rank_before_str.split()[0] if rank_before_str else "GOLD",
+                rank_before_str.split()[1] if rank_before_str and len(rank_before_str.split()) > 1 else "IV",
                 lp_before
             )
-            line_color = GREEN if diff_val >= 0 else RED_C
-            draw.text((PADDING * 3, y + 6), line, font=font_sub, fill=line_color)
+            diff_str = f"+{diff_total}" if diff_total >= 0 else str(diff_total)
+            diff_color = GREEN if diff_total >= 0 else RED_C
+
+            if rank_before_str != rank_after_str:
+                line = f"{pseudo}  -  {rank_before_str} -> {rank_after_str}  |  {lp_before} -> {lp_after} LP  ({diff_str})"
+            else:
+                line = f"{pseudo}  -  {rank_before_str}  |  {lp_before} -> {lp_after} LP  ({diff_str})"
+
+            draw.text((PADDING * 3, y + 6), line, font=font_sub, fill=diff_color)
 
     draw.rectangle([0, total_height - 4, total_width, total_height], fill=result_color)
 
@@ -315,6 +294,7 @@ async def setup_hook():
 async def on_ready():
     await tree.sync()
     print(f"✅ Bot connecté : {bot.user}")
+    print(f"📁 Chemin joueurs : {JOUEURS_PATH}")
     check_games.start()
 
 
@@ -413,7 +393,6 @@ async def check_games():
     joueurs = load_joueurs()
     print(f"👥 {len(joueurs)} joueur(s) surveillé(s)")
 
-    # Regrouper les joueurs actifs par gameId
     active_games = {}
     for j in joueurs:
         puuid = j["puuid"]
@@ -424,7 +403,6 @@ async def check_games():
                 active_games[game_id] = []
             active_games[game_id].append((j, game_data))
 
-    # Traiter les nouveaux en game
     for game_id, players in active_games.items():
         for j, game_data in players:
             puuid = j["puuid"]
@@ -475,7 +453,6 @@ async def check_games():
                 embed.set_thumbnail(url=get_champion_icon_url(champion, ddragon_version))
                 await channel.send(embed=embed)
 
-    # Détecter les fins de game
     puuids_en_game = list(en_game.keys())
     active_puuids = {j["puuid"] for players in active_games.values() for j, _ in players}
 
@@ -519,7 +496,6 @@ async def check_games():
         win = player_stats["win"]
         snap = lp_snapshot.pop(puuid, None)
 
-        # LP après la game
         lp_after = None
         tier_after = None
         rank_after = None
@@ -630,21 +606,16 @@ async def check_games():
 
         if snap and snap["lp"] is not None and lp_after is not None and tier_after and rank_after:
             rank_before_str = snap["rank"]
+            diff_total = lp_to_total(tier_after, rank_after, lp_after) - lp_to_total(
+                snap.get("tier", "GOLD"),
+                snap.get("division", "IV"),
+                snap["lp"]
+            )
+            diff_str = f"+{diff_total}" if diff_total >= 0 else str(diff_total)
+
             if rank_before_str != rank_after_str:
-                diff_total = lp_to_total(tier_after.upper(), rank_after, lp_after) - lp_to_total(
-                    snap.get("tier", "GOLD").upper(),
-                    snap.get("division", "IV"),
-                    snap["lp"]
-                )
-                diff_str = f"+{diff_total}" if diff_total >= 0 else str(diff_total)
                 lp_text = f"{rank_before_str} {snap['lp']} LP  ->  {rank_after_str} {lp_after} LP  ({diff_str})"
             else:
-                diff = lp_to_total(tier_after.upper(), rank_after, lp_after) - lp_to_total(
-                    snap.get("tier", "GOLD").upper(),
-                    snap.get("division", "IV"),
-                    snap["lp"]
-                )
-                diff_str = f"+{diff}" if diff >= 0 else str(diff)
                 lp_text = f"{snap['lp']} -> {lp_after} LP  ({diff_str})"
 
             embed.add_field(name="📈 LP", value=lp_text, inline=False)
