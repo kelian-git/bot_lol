@@ -25,6 +25,9 @@ tree = bot.tree
 
 # Charger les joueurs
 def load_joueurs():
+    if not os.path.exists("joueurs.json"):
+        with open("joueurs.json", "w") as f:
+            json.dump({"joueurs": []}, f)
     with open("joueurs.json", "r") as f:
         return json.load(f)["joueurs"]
 
