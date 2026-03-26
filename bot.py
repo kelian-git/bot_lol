@@ -397,6 +397,7 @@ async def check_games():
     for j in joueurs:
         puuid = j["puuid"]
         game_data = get_spectator(puuid)
+        print(f"  -> Spectator {pseudo}: {'EN GAME' if game_data else 'pas en game'}")
         if game_data:
             game_id = str(game_data.get("gameId", ""))
             if game_id not in active_games:
