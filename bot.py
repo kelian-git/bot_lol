@@ -467,7 +467,9 @@ async def check_games():
             continue
 
         pseudo = j["pseudo"]
-        game_info = en_game.pop(puuid)
+        game_info = en_game.pop(puuid, None)
+        if not game_info:
+            continue
         print(f"🏁 Fin de game pour {pseudo}, attente 30s...")
         await asyncio.sleep(30)
 
